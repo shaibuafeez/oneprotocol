@@ -21,8 +21,7 @@ import type {
   YieldPosition,
   RiskLevel,
 } from "@/lib/types";
-import { scanYields, getCurrentPositions } from "@/agent/yield-scanner";
-import { isAgentRunning, getRiskLevel } from "@/agent/executor";
+import { scanYields } from "@/agent/yield-scanner";
 import {
   fetchFundingRates,
   type BluefinFundingRate,
@@ -61,26 +60,30 @@ export function YieldDashboard({ refreshTrigger }: YieldDashboardProps) {
   const [riskLevel, setRiskLevel] = useState<RiskLevel>("moderate");
   const [fundingRates, setFundingRates] = useState<BluefinFundingRate[]>([]);
   const [history, setHistory] = useState<{ apy: number[]; tvl: number[] }>({ apy: [], tvl: [] });
+  const [agentActive, setAgentActive] = useState(false);
 
   const loadYields = useCallback(async () => {
     setLoading(true);
     try {
-      const [yields, rates] = await Promise.all([
+      const [yields, rates, treasuryRes] = await Promise.all([
         scanYields(),
         fetchFundingRates().catch(() => [] as BluefinFundingRate[]),
+        fetch("/api/treasury").then(r => r.ok ? r.json() : null).catch(() => null),
       ]);
       setOpportunities(yields);
       setFundingRates(rates);
-      const pos = getCurrentPositions();
+
+      // Get positions + agent state from server API
+      const pos = treasuryRes?.positions || [];
       setPositions(pos);
       setLastScan(Date.now());
-      setRiskLevel(getRiskLevel());
+      setRiskLevel(treasuryRes?.riskLevel || "moderate");
+      setAgentActive(treasuryRes?.agentRunning || false);
 
-      // Simulate history data if empty (for demo visuals)
       const bestApy = yields[0]?.netApy || 0;
       setHistory(prev => ({
         apy: [...prev.apy, bestApy].slice(-20),
-        tvl: [...prev.tvl, pos.reduce((s, p) => s + p.amountUsd, 0)].slice(-20)
+        tvl: [...prev.tvl, pos.reduce((s: number, p: YieldPosition) => s + p.amountUsd, 0)].slice(-20)
       }));
 
     } catch (err) {
@@ -95,7 +98,6 @@ export function YieldDashboard({ refreshTrigger }: YieldDashboardProps) {
 
   const totalDeployed = positions.reduce((sum, p) => sum + p.amountUsd, 0);
   const bestApy = opportunities[0]?.netApy || 0;
-  const agentActive = isAgentRunning();
 
   // Prepare Chart Data
   const chartData = opportunities.slice(0, 5).map(o => ({
