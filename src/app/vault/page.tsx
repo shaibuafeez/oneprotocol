@@ -14,7 +14,6 @@ export default function VaultPage() {
   );
 
   const suiBalance = BigInt(balanceData?.totalBalance || "0");
-  const arcBalance = 50_000_000n;
 
   return (
     <div className="min-h-screen text-foreground">
@@ -29,7 +28,7 @@ export default function VaultPage() {
             </p>
           </div>
 
-          <VaultStatus suiBalance={suiBalance} arcBalance={arcBalance} />
+          <VaultStatus suiBalance={suiBalance} />
         </div>
       </main>
     </div>
