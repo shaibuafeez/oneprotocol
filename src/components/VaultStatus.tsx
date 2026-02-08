@@ -9,14 +9,12 @@ import {
   Tooltip,
 } from "recharts";
 import { motion } from "framer-motion";
-import { PortfolioState, PriceData } from "@/lib/types";
-import { fetchPrices, buildPortfolioState } from "@/agent/strategy";
-import { getCurrentPositions } from "@/agent/yield-scanner";
+import { PriceData, YieldPosition } from "@/lib/types";
+import { fetchPrices } from "@/agent/strategy";
 import {
   Wallet,
   Activity,
   Layers,
-  ArrowUpRight,
   ShieldCheck,
   Zap,
   TrendingUp
@@ -24,10 +22,8 @@ import {
 
 interface VaultStatusProps {
   suiBalance: bigint;
-  arcBalance: bigint;
 }
 
-// Monochromatic Ice Theme Colors
 const COLORS = {
   ice: "#88BDF2",
   iceDark: "#1e3a8a",
@@ -45,26 +41,53 @@ const PIE_COLORS = [
   "#1d4ed8", // Blue 700
 ];
 
-export function VaultStatus({ suiBalance, arcBalance }: VaultStatusProps) {
+export function VaultStatus({ suiBalance }: VaultStatusProps) {
   const [prices, setPrices] = useState<PriceData[]>([]);
-  const [portfolio, setPortfolio] = useState<PortfolioState | null>(null);
+  const [arcVaultBalance, setArcVaultBalance] = useState(0);
+  const [positions, setPositions] = useState<YieldPosition[]>([]);
   const [earnings, setEarnings] = useState(0);
   const earningsRef = useRef(0);
   const rateRef = useRef(0);
 
+  // Fetch prices from CoinGecko (public API, works from client)
   useEffect(() => {
     const update = async () => {
       const p = await fetchPrices();
       setPrices(p);
-      const suiPrice = p.find((x) => x.asset === "SUI")?.price || 0;
-      setPortfolio(buildPortfolioState(suiBalance, arcBalance, suiPrice));
     };
     update();
     const interval = setInterval(update, 10000);
     return () => clearInterval(interval);
-  }, [suiBalance, arcBalance]);
+  }, []);
 
-  const positions = getCurrentPositions();
+  // Fetch Arc vault balance + positions from server API
+  useEffect(() => {
+    const fetchTreasury = async () => {
+      try {
+        const res = await fetch("/api/treasury");
+        if (!res.ok) return;
+        const data = await res.json();
+        // Real on-chain vault balance from Arc
+        if (data.vaultHealth) {
+          setArcVaultBalance(data.vaultHealth.balance);
+        }
+        // Real positions from server state
+        if (data.positions) {
+          setPositions(data.positions);
+        }
+      } catch (e) {
+        console.error("Treasury API fetch failed:", e);
+      }
+    };
+    fetchTreasury();
+    const interval = setInterval(fetchTreasury, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const suiPrice = prices.find((x) => x.asset === "SUI")?.price || 0;
+  const suiValueUsd = (Number(suiBalance) / 1e9) * suiPrice;
+  const arcValueUsd = arcVaultBalance; // already in USD from getVaultHealth
+
   const totalYield = positions.reduce((sum, p) => sum + p.earnedUsd, 0);
   const totalDeployed = positions.reduce((sum, p) => sum + p.amountUsd, 0);
   const avgApy =
@@ -99,19 +122,18 @@ export function VaultStatus({ suiBalance, arcBalance }: VaultStatusProps) {
     return () => cancelAnimationFrame(raf);
   }, [avgApy, totalDeployed]);
 
-  // Build pie data
+  // Build pie data from real sources
   const pieData = [
-    { name: "Sui", value: portfolio?.sui.valueUsd || 0 },
-    { name: "Arc USDC", value: portfolio?.arc.valueUsd || 0 },
+    { name: "Sui", value: suiValueUsd },
+    { name: "Arc USDC", value: arcValueUsd },
     ...positions.map((p) => ({
-      name: `${p.protocol}`,
+      name: p.protocol,
       value: p.amountUsd,
     })),
   ].filter((d) => d.value > 0);
 
-  const totalValue = portfolio?.totalValueUsd || 0;
+  const totalValue = suiValueUsd + arcValueUsd + totalDeployed;
 
-  // Animation Variants
   const containerVariants = {
     hidden: { opacity: 0 },
     show: {
@@ -134,7 +156,7 @@ export function VaultStatus({ suiBalance, arcBalance }: VaultStatusProps) {
       animate="show"
       className="grid grid-cols-1 md:grid-cols-12 gap-6 w-full"
     >
-      {/* 1. Total Vault Value (Top Left) */}
+      {/* 1. Total Vault Value */}
       <motion.div variants={itemVariants} className="col-span-12 md:col-span-4 relative overflow-hidden rounded-3xl bg-white/5 border border-white/10 backdrop-blur-xl p-8 flex flex-col justify-between min-h-[220px] hover:border-white/20 transition-colors group">
         <div className="absolute top-0 right-0 w-32 h-32 bg-blue-500/10 rounded-full blur-[50px] pointer-events-none group-hover:bg-blue-500/20 transition-all" />
 
@@ -152,17 +174,17 @@ export function VaultStatus({ suiBalance, arcBalance }: VaultStatusProps) {
           <div className="flex gap-3 text-sm text-slate-500">
             <span className="flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />
-              {portfolio?.sui.balance.toString()} SUI
+              {(Number(suiBalance) / 1e9).toFixed(2)} SUI
             </span>
             <span className="flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-ice" />
-              ${(Math.round(Number(portfolio?.arc.valueUsd || 0))).toLocaleString()} Arc
+              ${arcValueUsd.toFixed(2)} Arc
             </span>
           </div>
         </div>
       </motion.div>
 
-      {/* 2. Live Earnings (Top Middle) */}
+      {/* 2. Live Earnings */}
       <motion.div variants={itemVariants} className="col-span-12 md:col-span-4 relative overflow-hidden rounded-3xl bg-white/5 border border-white/10 backdrop-blur-xl p-8 flex flex-col justify-between min-h-[220px] hover:border-white/20 transition-colors group">
         <div className="absolute top-0 right-0 w-32 h-32 bg-ice/10 rounded-full blur-[50px] pointer-events-none group-hover:bg-ice/20 transition-all" />
 
@@ -183,7 +205,7 @@ export function VaultStatus({ suiBalance, arcBalance }: VaultStatusProps) {
         </div>
       </motion.div>
 
-      {/* 3. Performance / APY (Top Right) */}
+      {/* 3. Net APY */}
       <motion.div variants={itemVariants} className="col-span-12 md:col-span-4 relative overflow-hidden rounded-3xl bg-white/5 border border-white/10 backdrop-blur-xl p-8 flex flex-col justify-between min-h-[220px] hover:border-white/20 transition-colors group">
         <div className="absolute top-0 right-0 w-32 h-32 bg-blue-600/10 rounded-full blur-[50px] pointer-events-none group-hover:bg-blue-600/20 transition-all" />
 
@@ -206,7 +228,7 @@ export function VaultStatus({ suiBalance, arcBalance }: VaultStatusProps) {
         </div>
       </motion.div>
 
-      {/* 4. Asset Allocation (Bottom Left - Wide) */}
+      {/* 4. Asset Allocation */}
       <motion.div variants={itemVariants} className="col-span-12 lg:col-span-8 rounded-3xl bg-white/5 border border-white/10 backdrop-blur-xl p-8 min-h-[400px] flex flex-col">
         <div className="flex items-center justify-between mb-8">
           <div className="flex items-center gap-3">
@@ -229,33 +251,38 @@ export function VaultStatus({ suiBalance, arcBalance }: VaultStatusProps) {
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie
-                data={pieData}
+                data={pieData.length > 0 ? pieData : [{ name: "Empty", value: 1 }]}
                 innerRadius={100}
                 outerRadius={130}
                 paddingAngle={4}
                 dataKey="value"
                 stroke="none"
               >
-                {pieData.map((entry, index) => (
-                  <Cell key={index} fill={PIE_COLORS[index % PIE_COLORS.length]} stroke="rgba(0,0,0,0)" strokeWidth={0} />
-                ))}
+                {pieData.length > 0
+                  ? pieData.map((_entry, index) => (
+                      <Cell key={index} fill={PIE_COLORS[index % PIE_COLORS.length]} stroke="rgba(0,0,0,0)" strokeWidth={0} />
+                    ))
+                  : <Cell fill="#334155" />
+                }
               </Pie>
               <Tooltip
                 contentStyle={{ backgroundColor: '#050505', borderColor: 'rgba(255,255,255,0.1)', borderRadius: '12px', boxShadow: '0 10px 30px rgba(0,0,0,0.5)' }}
                 itemStyle={{ color: '#fff', fontSize: '14px', fontWeight: 500 }}
-                formatter={(value: any) => [`$${Number(value).toLocaleString()}`, 'Value']}
+                formatter={(value) => [`$${Number(value).toLocaleString()}`, 'Value']}
               />
             </PieChart>
           </ResponsiveContainer>
 
           <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
             <span className="text-sm text-slate-500 uppercase tracking-wider mb-1">Total Assets</span>
-            <span className="text-3xl font-bold text-white font-mono pointer-events-auto">${(totalValue / 1000).toFixed(1)}k</span>
+            <span className="text-3xl font-bold text-white font-mono pointer-events-auto">
+              {totalValue >= 1000 ? `$${(totalValue / 1000).toFixed(1)}k` : `$${totalValue.toFixed(2)}`}
+            </span>
           </div>
         </div>
       </motion.div>
 
-      {/* 5. Live Feeds / Active Strategies (Bottom Right) */}
+      {/* 5. Live Oracles */}
       <motion.div variants={itemVariants} className="col-span-12 lg:col-span-4 rounded-3xl bg-white/5 border border-white/10 backdrop-blur-xl p-8 min-h-[400px] flex flex-col">
         <div className="flex items-center justify-between mb-8">
           <div className="flex items-center gap-3">
@@ -271,7 +298,7 @@ export function VaultStatus({ suiBalance, arcBalance }: VaultStatusProps) {
         </div>
 
         <div className="flex-1 grid gap-3 content-start">
-          {prices.map((p, i) => (
+          {prices.map((p) => (
             <div key={p.asset} className="flex items-center justify-between p-4 bg-black/20 rounded-2xl border border-white/5 hover:bg-white/5 transition-colors group">
               <div className="flex items-center gap-4">
                 <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-sm font-bold text-slate-300 border border-white/5 group-hover:border-ice/30 group-hover:text-ice transition-colors">
@@ -289,14 +316,14 @@ export function VaultStatus({ suiBalance, arcBalance }: VaultStatusProps) {
           {prices.length === 0 && (
             <div className="flex flex-col items-center justify-center py-12 text-slate-500 gap-3">
               <div className="w-6 h-6 border-2 border-white/10 border-t-ice rounded-full animate-spin" />
-              <span className="text-sm">Connecting to Pyth...</span>
+              <span className="text-sm">Connecting to oracles...</span>
             </div>
           )}
         </div>
 
         <div className="mt-8 pt-6 border-t border-white/5 flex items-center justify-center gap-2 text-xs text-slate-500">
           <ShieldCheck className="w-4 h-4" />
-          <span>Verified by Pyth Network</span>
+          <span>CoinGecko Oracle Feed</span>
         </div>
       </motion.div>
     </motion.div>
